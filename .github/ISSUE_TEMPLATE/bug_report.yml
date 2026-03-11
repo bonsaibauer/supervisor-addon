@@ -1,0 +1,36 @@
+name: "🐞 Bug report"
+description: "Report a reproducible bug"
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: "💥 What happened?"
+      description: What did you expect instead?
+      placeholder: Clear bug summary
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "🧪 Steps to reproduce"
+      placeholder: |
+        1. Go to ...
+        2. Click ...
+        3. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: "🖥️ Environment"
+      description: Add versions and setup details
+      placeholder: |
+        Addon version:
+        Deployment (docker/compose):
+        HTTPS/proxy setup:
+  - type: textarea
+    id: logs
+    attributes:
+      label: "📎 Relevant logs / screenshots"
+      render: shell

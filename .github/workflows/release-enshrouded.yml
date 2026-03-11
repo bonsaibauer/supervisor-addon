@@ -1,0 +1,309 @@
+name: Release Enshrouded Addon
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (SemVer, e.g. 1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+  security-events: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pushed branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag from manual input
+        id: meta
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Input version '$VERSION' is not semver-like (X.Y.Z)."
+            exit 1
+          fi
+          echo "release_tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive update action from changed paths
+        id: plan
+        run: |
+          mkdir -p out
+          python - <<'PY'
+          import json
+          import fnmatch
+          import os
+          import subprocess
+          from datetime import datetime, timezone
+
+          release_tag = os.environ["RELEASE_TAG"]
+          version = os.environ["RELEASE_VERSION"]
+          commit = os.environ["GITHUB_SHA"]
+
+          subprocess.check_call(["git", "fetch", "--tags", "--force"])
+          tags_raw = subprocess.check_output(["git", "tag", "--list", "v*", "--sort=-v:refname"], text=True)
+          tags = [line.strip() for line in tags_raw.splitlines() if line.strip()]
+          previous_tag = next((tag for tag in tags if tag != release_tag), None)
+
+          if previous_tag:
+              changed_raw = subprocess.check_output(["git", "diff", "--name-only", f"{previous_tag}...HEAD"], text=True)
+              changed_files = [line.strip() for line in changed_raw.splitlines() if line.strip()]
+          else:
+              changed_raw = subprocess.check_output(["git", "ls-files"], text=True)
+              changed_files = [line.strip() for line in changed_raw.splitlines() if line.strip()]
+
+          changed = sorted(set(changed_files))
+
+          def matches(path: str, patterns: list[str]) -> bool:
+              return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
+
+          no_action_patterns = [
+              "docs/**",
+              "README.md",
+              ".github/**",
+              ".gitignore",
+          ]
+          browser_reload_patterns = [
+              "panel/**",
+          ]
+          gateway_restart_patterns = [
+              "supervisor_gateway/**",
+              "supervisor_addon/**",
+              "pyproject.toml",
+          ]
+          container_recreate_patterns = [
+              "supervisord.addon.conf",
+          ]
+
+          effective_changed = [path for path in changed if not matches(path, no_action_patterns)]
+
+          if not effective_changed:
+              update_kind = "no_action"
+              required_action = "none"
+              reason = "No runtime-relevant files changed."
+              primary_button = "No action needed"
+              steps = []
+          elif any(matches(path, container_recreate_patterns) for path in effective_changed):
+              update_kind = "container_runtime"
+              required_action = "container_recreate"
+              reason = "Bootstrap/image-level files changed and require container recreate."
+              primary_button = "Recreate Container"
+              steps = [
+                  "Pull latest available image.",
+                  "Recreate container.",
+                  "Verify supervisor bootstrap config is loaded.",
+              ]
+          elif all(matches(path, browser_reload_patterns) for path in effective_changed):
+              update_kind = "panel_only"
+              required_action = "browser_reload"
+              reason = "Only panel assets changed."
+              primary_button = "Reload UI"
+              steps = ["Hard reload browser (Ctrl+F5)."]
+          elif any(matches(path, gateway_restart_patterns) for path in effective_changed):
+              update_kind = "service_runtime"
+              required_action = "gateway_restart"
+              reason = "Gateway/addon runtime changed and is applied with service restart."
+              primary_button = "Restart Gateway"
+              steps = [
+                  "Install update from panel/API.",
+                  "Restart supervisor-gateway.",
+                  "Reload browser if panel assets were also changed.",
+              ]
+          else:
+              update_kind = "service_runtime"
+              required_action = "gateway_restart"
+              reason = "Non-documentation repository files changed."
+              primary_button = "Restart Gateway"
+              steps = [
+                  "Install update from panel/API.",
+                  "Restart supervisor-gateway.",
+              ]
+
+          payload = {
+              "version": version,
+              "tag": release_tag,
+              "commit": commit,
+              "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "previous_tag": previous_tag,
+              "update_kind": update_kind,
+              "required_action": required_action,
+              "primary_button": primary_button,
+              "reason": reason,
+              "recommended_steps": steps,
+              "changed_files_count": len(changed),
+              "effective_changed_files_count": len(effective_changed),
+          }
+
+          with open("out/version.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, separators=(",", ":"), ensure_ascii=True)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"previous_tag={previous_tag or ''}\n")
+              out.write(f"update_kind={update_kind}\n")
+              out.write(f"required_action={required_action}\n")
+              out.write(f"primary_button={primary_button}\n")
+              out.write(f"reason={reason}\n")
+          PY
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Trivy scan (non-blocking)
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "$HOME/.cache/trivy:/root/.cache/" \
+            aquasec/trivy:0.65.0 \
+            fs /workspace \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH \
+            --format table \
+            --exit-code 0
+
+      - name: Trivy SARIF (all severities)
+        run: |
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -v "$HOME/.cache/trivy:/root/.cache/" \
+            aquasec/trivy:0.65.0 \
+            fs /workspace \
+            --ignore-unfixed \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --format sarif \
+            --output /workspace/trivy.sarif \
+            --exit-code 0
+
+      - name: Trim Trivy SARIF (limit locations)
+        run: |
+          jq '
+            .runs[0].results |= map(
+              if (.locations | length) > 1000
+              then .locations = (.locations[:1000]) | .
+              else .
+              end
+            )
+          ' trivy.sarif > trivy.limited.sarif
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.limited.sarif
+          category: trivy-fs
+
+      - name: Security report summary
+        if: always()
+        run: |
+          set -euo pipefail
+          total=0
+          errors=0
+          warnings=0
+          notes=0
+
+          if [ -f trivy.limited.sarif ]; then
+            total=$(jq '[.runs[].results[]?] | length' trivy.limited.sarif)
+            errors=$(jq '[.runs[].results[]? | select((.level // "" | ascii_downcase) == "error")] | length' trivy.limited.sarif)
+            warnings=$(jq '[.runs[].results[]? | select((.level // "" | ascii_downcase) == "warning")] | length' trivy.limited.sarif)
+            notes=$(jq '[.runs[].results[]? | select((.level // "" | ascii_downcase) == "note")] | length' trivy.limited.sarif)
+          fi
+
+          {
+            echo "## Security Scan Report"
+            echo ""
+            echo "| Scanner | Findings total | Error | Warning | Note |"
+            echo "|---|---:|---:|---:|---:|"
+            echo "| Trivy (filesystem) | ${total} | ${errors} | ${warnings} | ${notes} |"
+            echo ""
+            echo "SARIF uploaded to GitHub Code Scanning."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload security reports artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports-${{ steps.meta.outputs.release_tag }}-${{ github.run_number }}
+          if-no-files-found: warn
+          path: |
+            trivy.sarif
+            trivy.limited.sarif
+
+      - name: Build release payload
+        run: |
+          RELEASE_DIR="out/enshrouded-release"
+          rm -rf "$RELEASE_DIR" dist build
+          find . -maxdepth 1 -name "*.egg-info" -type d -exec rm -rf {} +
+          mkdir -p "$RELEASE_DIR/python" "$RELEASE_DIR/panel" "$RELEASE_DIR/config"
+
+          python -m pip install --upgrade build
+          python -m build
+          cp dist/* "$RELEASE_DIR/python/"
+
+          pushd panel
+          npm ci
+          npm run build
+          popd
+          cp -R panel/dist/* "$RELEASE_DIR/panel/"
+
+          cp .env.example "$RELEASE_DIR/config/supervisor-addon.env.example"
+          cp supervisord.addon.conf "$RELEASE_DIR/config/supervisord.addon.conf"
+          cp out/version.json "$RELEASE_DIR/config/version.json"
+
+      - name: Validate release version file
+        run: |
+          VERSION_FILE="out/enshrouded-release/config/version.json"
+          test -f "$VERSION_FILE"
+          grep -q "\"version\":\"${{ github.event.inputs.version }}\"" "$VERSION_FILE"
+          grep -q "\"tag\":\"${{ steps.meta.outputs.release_tag }}\"" "$VERSION_FILE"
+          grep -q "\"required_action\":" "$VERSION_FILE"
+
+      - name: Pack release asset
+        run: |
+          cd out/enshrouded-release
+          tar -czf "../enshrouded-release.tar.gz" .
+          cd ..
+          sha256sum enshrouded-release.tar.gz | awk '{print $1}' > enshrouded-release.tar.gz.sha256
+
+      - name: Move release tag to current commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa "${{ steps.meta.outputs.release_tag }}" -m "Release ${{ steps.meta.outputs.release_tag }}"
+          git push origin "refs/tags/${{ steps.meta.outputs.release_tag }}" --force
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          target_commitish: ${{ github.ref_name }}
+          name: ${{ steps.meta.outputs.release_tag }}
+          make_latest: true
+          append_body: false
+          generate_release_notes: false
+          body: |
+            Required Action: ${{ steps.plan.outputs.required_action }}
+            Reason: ${{ steps.plan.outputs.reason }}
+            Primary Button: ${{ steps.plan.outputs.primary_button }}
+            Full Changelog: https://github.com/${{ github.repository }}/commits/${{ steps.meta.outputs.release_tag }}
+          files: |
+            out/enshrouded-release.tar.gz
+            out/enshrouded-release.tar.gz.sha256
+            out/version.json

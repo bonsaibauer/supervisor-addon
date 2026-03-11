@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supervisor-stack"
+version = "0.1.0"
+description = "Supervisor addon and gateway in a single minimal repository layout."
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Supervisor Stack Contributors" }
+]
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+supervisor-gateway = "supervisor_gateway.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["supervisor_addon*", "supervisor_gateway*"]
+
+[tool.setuptools.package-data]
+supervisor_gateway = ["auth_templates/*.json"]

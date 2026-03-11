@@ -1,0 +1,23 @@
+{
+  "username": "admin",
+  "role": "admin",
+  "permissions": [
+    "admin",
+    "logs.read",
+    "activity.read",
+    "server.read",
+    "server.control",
+    "files.read",
+    "files.write",
+    "news.read"
+  ],
+  "servers": [
+    "*"
+  ],
+  "preferences": {
+    "language": "en",
+    "timezone": "Europe/London"
+  },
+  "must_change_password": true,
+  "initial_password": "change-me"
+}

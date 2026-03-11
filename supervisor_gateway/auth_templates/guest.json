@@ -1,0 +1,20 @@
+{
+  "username": "guest",
+  "role": "guest",
+  "permissions": [
+    "logs.read",
+    "activity.read",
+    "server.read",
+    "server.control",
+    "news.read"
+  ],
+  "servers": [
+    "*"
+  ],
+  "preferences": {
+    "language": "en",
+    "timezone": "Europe/London"
+  },
+  "must_change_password": true,
+  "initial_password": "change-me"
+}

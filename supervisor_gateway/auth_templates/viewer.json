@@ -1,0 +1,17 @@
+{
+  "username": "viewer",
+  "role": "viewer",
+  "permissions": [
+    "logs.read",
+    "activity.read"
+  ],
+  "servers": [
+    "*"
+  ],
+  "preferences": {
+    "language": "en",
+    "timezone": "Europe/London"
+  },
+  "must_change_password": true,
+  "initial_password": "change-me"
+}
